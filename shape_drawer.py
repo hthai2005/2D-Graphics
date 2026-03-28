@@ -1,7 +1,3 @@
-"""
-Interactive 2D Shape Drawer — GLFW + PyOpenGL (+ NumPy)
-Orthographic projection, dynamic VBO, mouse placement, keyboard colors.
-"""
 from __future__ import annotations
 
 import math
@@ -39,7 +35,6 @@ void main() {
 
 
 def ortho_2d_tl_origin(width: float, height: float) -> np.ndarray:
-    """Row-major 4x4: screen (0,0)=top-left, y down -> NDC. Use with glUniformMatrix4fv(..., GL_TRUE, ...)."""
     w, h = float(width), float(height)
     return np.array(
         [
@@ -59,7 +54,6 @@ def compile_program() -> int:
 
 
 def cursor_to_framebuffer(win, x: float, y: float) -> Tuple[float, float]:
-    """Map window-space cursor to framebuffer pixels (handles HiDPI scaling)."""
     fw, fh = glfw.get_framebuffer_size(win)
     ww, wh = glfw.get_window_size(win)
     if ww <= 0 or wh <= 0:
@@ -108,7 +102,6 @@ def point_in_triangle(
 
 
 def triangulate_polygon(verts: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
-    """Ear clipping for simple polygons (supports concave, non-self-intersecting)."""
     if len(verts) < 3:
         return []
     pts = verts[:]
@@ -128,7 +121,6 @@ def triangulate_polygon(verts: List[Tuple[float, float]]) -> List[Tuple[float, f
             i_next = idx[(i + 1) % m]
             a, b, c = pts[i_prev], pts[i_curr], pts[i_next]
 
-            # Convex test (CCW orientation expected)
             cross = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
             if cross <= 1e-8:
                 continue
@@ -149,7 +141,6 @@ def triangulate_polygon(verts: List[Tuple[float, float]]) -> List[Tuple[float, f
             break
 
         if not ear_found:
-            # Fallback: return empty so caller can skip filled rendering.
             return []
     return out
 
@@ -224,14 +215,12 @@ def main() -> None:
     drag_idx: int | None = None
     hit_radius = 14.0
 
-    # Mouse-based move mode (checkbox in UI)
     move_mouse_dragging = False
     move_mouse_target_idx: int | None = None
     moved_shape_idx: int | None = None
     move_mouse_last_pos: Tuple[float, float] = (0.0, 0.0)
 
     def shape_hit_index(fx: float, fy: float, pad: float = 10.0) -> int | None:
-        """Return last-hit shape index by AABB test (fast + good enough for UI move)."""
         for i in range(len(shapes) - 1, -1, -1):
             verts = shapes[i].vertices
             if not verts:
@@ -245,7 +234,6 @@ def main() -> None:
         return None
 
     def upload(verts: List[Tuple[float, float]]) -> int:
-        """Upload verts to the shared VBO. Returns vertex count uploaded."""
         if verts:
             arr = np.array(verts, dtype=np.float32).flatten()
             glBindBuffer(GL_ARRAY_BUFFER, vbo)
@@ -285,7 +273,6 @@ def main() -> None:
         ]
 
     def tool_vertices(kind: ToolKind, x0: float, y0: float, x1: float, y1: float) -> List[Tuple[float, float]]:
-        """Create a preset shape from a drag bbox (x0,y0)->(x1,y1)."""
         dx = x1 - x0
         dy = y1 - y0
         cx = (x0 + x1) * 0.5
@@ -303,7 +290,6 @@ def main() -> None:
                 (float(left), float(bottom)),
             ]
         if kind == "square":
-            # Use the bigger drag axis to define the side length.
             side = size
             if side < 1.0:
                 side = 1.0
@@ -323,7 +309,6 @@ def main() -> None:
             left, right = (x0, x1) if x0 <= x1 else (x1, x0)
             top, bottom = (y0, y1) if y0 <= y1 else (y1, y0)
             apex_x = (left + right) * 0.5
-            # If user drags downwards -> apex on top. Drag upwards -> apex on bottom.
             apex_y = top if dy >= 0 else bottom
             base_y = bottom if dy >= 0 else top
             return [
@@ -404,10 +389,8 @@ def main() -> None:
         mode_var.set(draw_mode)
 
     def rgb_to_hex(r: float, g: float, b: float) -> str:
-        # Tkinter button background expects hex like "#RRGGBB"
         return "#{:02x}{:02x}{:02x}".format(int(max(0, min(1, r)) * 255), int(max(0, min(1, g)) * 255), int(max(0, min(1, b)) * 255))
 
-    # --- Menu UI (Tkinter) ---
     ui_root = tk.Tk()
     ui_root.title("2D Shape Drawer Menu")
     ui_root.resizable(False, False)
@@ -439,7 +422,6 @@ def main() -> None:
             commit_shape()
 
     def ui_undo() -> None:
-        # In tool mode, `current` is a preview; undo should remove last committed shape.
         if tool_kind == "freeform" and current:
             current.pop()
         elif shapes:
@@ -450,15 +432,12 @@ def main() -> None:
         current.clear()
 
     def ui_scale_up() -> None:
-        # Kept for compatibility if you re-enable scale buttons.
         apply_scale_target(1.1)
 
     def ui_scale_down() -> None:
-        # Kept for compatibility if you re-enable scale buttons.
         apply_scale_target(0.9)
 
     def start_tool(kind: ToolKind) -> None:
-        """Select a draw tool. User will click-drag on the OpenGL canvas to place a new shape."""
         nonlocal tool_kind, tool_dragging, draw_mode
         tool_kind = kind
         tool_dragging = False
@@ -541,8 +520,6 @@ def main() -> None:
     tk.Button(preset_frame, text="Pentagon", command=lambda: start_tool("pentagon")).pack(side="left", expand=True, fill="x", padx=2, pady=6)
     tk.Button(preset_frame, text="Star", command=lambda: start_tool("star")).pack(side="left", expand=True, fill="x", padx=2, pady=6)
 
-    # Scale buttons removed (scale via Ctrl+Wheel)
-
     transform_frame = tk.LabelFrame(ui_root, text="Move (mouse drag) & Rotate")
     transform_frame.pack(fill="x", padx=8, pady=6)
 
@@ -609,9 +586,7 @@ def main() -> None:
         mx, my = glfw.get_cursor_pos(win)
         mx, my = cursor_to_framebuffer(win, mx, my)
 
-        # If Move-by-mouse is enabled, we only move committed shapes.
         if move_mouse_var.get():
-            # Cancel tool preview when starting to move.
             if button == glfw.MOUSE_BUTTON_LEFT and action == glfw.PRESS:
                 idx = shape_hit_index(mx, my)
                 if idx is not None:
@@ -622,16 +597,13 @@ def main() -> None:
                     move_mouse_target_idx = idx
                     move_mouse_last_pos = (float(mx), float(my))
                     moved_shape_idx = idx
-                # Always block drawing while move mode is on.
                 return
             if button == glfw.MOUSE_BUTTON_LEFT and action == glfw.RELEASE:
                 move_mouse_dragging = False
                 move_mouse_target_idx = None
-                # Keep moved_shape_idx so Rotate will target the last moved shape.
                 return
             return
 
-        # Tool-based drawing (triangle/circle/rectangle/star/...)
         if tool_kind != "freeform":
             if button == glfw.MOUSE_BUTTON_LEFT and action == glfw.PRESS:
                 tool_dragging = True
@@ -661,10 +633,8 @@ def main() -> None:
                     )
                 current.clear()
                 return
-            # Ignore other mouse actions while a tool is active.
             return
 
-        # Freeform vertex editing
         if button == glfw.MOUSE_BUTTON_LEFT and action == glfw.PRESS:
             if drag_idx is None:
                 current.append((float(mx), float(my)))
@@ -742,11 +712,9 @@ def main() -> None:
             shapes.clear()
             current.clear()
         elif key == glfw.KEY_M:
-            # Cycle palette forward (in case mouse wheel doesn't work well)
             color_idx = (color_idx + 1) % len(PALETTE)
             selected_color_var.set(f"Selected color: {color_idx + 1}/{len(PALETTE)}")
         elif key == glfw.KEY_N:
-            # Cycle palette backward
             color_idx = (color_idx - 1) % len(PALETTE)
             selected_color_var.set(f"Selected color: {color_idx + 1}/{len(PALETTE)}")
         elif key == glfw.KEY_P:
@@ -813,7 +781,6 @@ def main() -> None:
             return
         glBindVertexArray(vao)
 
-        # Fill (where applicable)
         if mode == "polygon":
             if fill and n >= 3:
                 tris = triangulate_polygon(verts)
@@ -824,7 +791,6 @@ def main() -> None:
                     glDrawArrays(GL_TRIANGLES, 0, tri_n)
                     n = upload(verts)
                 else:
-                    # Fallback: triangle fan fill (works best for convex polygons).
                     glUniform3f(u_color, r, g, b)
                     glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
                     glDrawArrays(GL_TRIANGLE_FAN, 0, n)
@@ -845,7 +811,6 @@ def main() -> None:
                     glUniform3f(u_color, r, g, b)
                     glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
                     glDrawArrays(GL_TRIANGLES, 0, tri_n)
-                # outline each triangle
                 er, eg, eb = (min(1.0, r + 0.2), min(1.0, g + 0.2), min(1.0, b + 0.2)) if fill else (r, g, b)
                 glUniform3f(u_color, er, eg, eb)
                 glLineWidth(2.0)
@@ -854,7 +819,6 @@ def main() -> None:
         elif mode == "points":
             pass
 
-        # Points on top (all modes)
         glUniform3f(u_color, r, g, b)
         glPointSize(8.0)
         glDrawArrays(GL_POINTS, 0, n)
@@ -876,11 +840,9 @@ def main() -> None:
         glUseProgram(program)
         glUniformMatrix4fv(u_mvp, 1, GL_TRUE, mvp)
 
-        # Draw committed shapes first
         for s in shapes:
             draw_shape(s.mode, s.vertices, s.color, s.filled)
 
-        # Draw current (in-progress) shape last, using current palette
         cur_rgb = PALETTE[color_idx]
         draw_shape(draw_mode, current, cur_rgb, filled)
 
