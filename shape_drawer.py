@@ -4,11 +4,12 @@ import math
 from dataclasses import dataclass
 from typing import List, Tuple, Literal
 
-import glfw
 import tkinter as tk
+from tkinter import font as tkfont
 import numpy as np
 from OpenGL.GL import *
 from OpenGL.GL import shaders
+from pyopengltk import OpenGLFrame
 
 W, H = 1024, 768
 
@@ -33,6 +34,26 @@ void main() {
 }
 """
 
+# Fallback for Tk/WGL contexts that reject 330 core shaders
+VERT_SRC_120 = """
+#version 120
+attribute vec2 aPos;
+uniform mat4 uMVP;
+uniform vec3 uColor;
+varying vec3 vColor;
+void main() {
+    vColor = uColor;
+    gl_Position = uMVP * vec4(aPos, 0.0, 1.0);
+}
+"""
+FRAG_SRC_120 = """
+#version 120
+varying vec3 vColor;
+void main() {
+    gl_FragColor = vec4(vColor, 1.0);
+}
+"""
+
 
 def ortho_2d_tl_origin(width: float, height: float) -> np.ndarray:
     w, h = float(width), float(height)
@@ -48,17 +69,14 @@ def ortho_2d_tl_origin(width: float, height: float) -> np.ndarray:
 
 
 def compile_program() -> int:
-    vs = shaders.compileShader(VERT_SRC, GL_VERTEX_SHADER)
-    fs = shaders.compileShader(FRAG_SRC, GL_FRAGMENT_SHADER)
-    return shaders.compileProgram(vs, fs)
-
-
-def cursor_to_framebuffer(win, x: float, y: float) -> Tuple[float, float]:
-    fw, fh = glfw.get_framebuffer_size(win)
-    ww, wh = glfw.get_window_size(win)
-    if ww <= 0 or wh <= 0:
-        return x, y
-    return x * fw / ww, y * fh / wh
+    try:
+        vs = shaders.compileShader(VERT_SRC, GL_VERTEX_SHADER)
+        fs = shaders.compileShader(FRAG_SRC, GL_FRAGMENT_SHADER)
+        return shaders.compileProgram(vs, fs)
+    except Exception:
+        vs = shaders.compileShader(VERT_SRC_120, GL_VERTEX_SHADER)
+        fs = shaders.compileShader(FRAG_SRC_120, GL_FRAGMENT_SHADER)
+        return shaders.compileProgram(vs, fs)
 
 
 def polygon_signed_area(verts: List[Tuple[float, float]]) -> float:
@@ -171,38 +189,17 @@ class Shape:
 def main() -> None:
     global W, H
 
-    if not glfw.init():
-        raise RuntimeError("glfw.init failed")
-
-    glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 3)
-    glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 3)
-    glfw.window_hint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE)
-
-    window = glfw.create_window(
-        W,
-        H,
-        "2D Shape Drawer — Tool: Click-drag (Triangle/Circle/Rect/Pentagon/Star) | Freeform: LMB add | RMB del | MMB drag",
-        None,
-        None,
-    )
-    if not window:
-        glfw.terminate()
-        raise RuntimeError("glfw.create_window failed")
-
-    glfw.make_context_current(window)
-    glfw.swap_interval(1)
-
-    program = compile_program()
-    u_mvp = glGetUniformLocation(program, "uMVP")
-    u_color = glGetUniformLocation(program, "uColor")
-
-    vbo = glGenBuffers(1)
-    vao = glGenVertexArrays(1)
-    glBindVertexArray(vao)
-    glBindBuffer(GL_ARRAY_BUFFER, vbo)
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, None)
-    glEnableVertexAttribArray(0)
-    glBindVertexArray(0)
+    # Layout / colors aligned with "2Interactive 2D Shape Drawer" (editor_panels toolbar + properties + status)
+    TOOLBAR_WIDTH = 118
+    PROPERTIES_WIDTH = 240
+    STATUS_BAR_HEIGHT = 24
+    PANEL_BG = "#ffffff"
+    PANEL_BORDER = "#d8dce6"
+    BUTTON_BG = "#eef1f6"
+    BUTTON_ACTIVE = "#c8d4f5"
+    TEXT_COLOR = "#1c1c28"
+    SUBTEXT_COLOR = "#5a6170"
+    PALETTE_WELL_BG = "#e8eaef"
 
     shapes: List[Shape] = []
     current: List[Tuple[float, float]] = []
@@ -217,8 +214,25 @@ def main() -> None:
 
     move_mouse_dragging = False
     move_mouse_target_idx: int | None = None
+    move_mouse_drag_free_current = False
     moved_shape_idx: int | None = None
     move_mouse_last_pos: Tuple[float, float] = (0.0, 0.0)
+
+    root = tk.Tk()
+    root.title("2D Shape Drawer")
+    root.minsize(TOOLBAR_WIDTH + PROPERTIES_WIDTH + 480, 400)
+    root.configure(bg=PANEL_BG)
+
+    mode_var = tk.StringVar(value=draw_mode)
+    filled_var = tk.BooleanVar(value=filled)
+    selected_color_var = tk.StringVar(value=f"Color {color_idx + 1}/{len(PALETTE)}")
+    status_var = tk.StringVar(value="")
+    move_mouse_var = tk.BooleanVar(value=False)
+    mouse_xy: List[float] = [0.0, 0.0]
+    hover_shape_idx: int | None = None
+
+    tool_bar_buttons: dict[ToolKind, tk.Button] = {}
+    _canvas_singleton: list = []
 
     def shape_hit_index(fx: float, fy: float, pad: float = 10.0) -> int | None:
         for i in range(len(shapes) - 1, -1, -1):
@@ -233,13 +247,23 @@ def main() -> None:
                 return i
         return None
 
+    def current_bbox_hit(fx: float, fy: float, pad: float = 10.0) -> bool:
+        if not current:
+            return False
+        minx = min(v[0] for v in current) - pad
+        maxx = max(v[0] for v in current) + pad
+        miny = min(v[1] for v in current) - pad
+        maxy = max(v[1] for v in current) + pad
+        return minx <= fx <= maxx and miny <= fy <= maxy
+
     def upload(verts: List[Tuple[float, float]]) -> int:
+        vb = _canvas_singleton[0]._vbo
         if verts:
             arr = np.array(verts, dtype=np.float32).flatten()
-            glBindBuffer(GL_ARRAY_BUFFER, vbo)
+            glBindBuffer(GL_ARRAY_BUFFER, vb)
             glBufferData(GL_ARRAY_BUFFER, arr.nbytes, arr, GL_DYNAMIC_DRAW)
             return len(verts)
-        glBindBuffer(GL_ARRAY_BUFFER, vbo)
+        glBindBuffer(GL_ARRAY_BUFFER, vb)
         glBufferData(GL_ARRAY_BUFFER, 0, None, GL_DYNAMIC_DRAW)
         return 0
 
@@ -391,14 +415,6 @@ def main() -> None:
     def rgb_to_hex(r: float, g: float, b: float) -> str:
         return "#{:02x}{:02x}{:02x}".format(int(max(0, min(1, r)) * 255), int(max(0, min(1, g)) * 255), int(max(0, min(1, b)) * 255))
 
-    ui_root = tk.Tk()
-    ui_root.title("2D Shape Drawer Menu")
-    ui_root.resizable(False, False)
-
-    mode_var = tk.StringVar(value=draw_mode)
-    filled_var = tk.BooleanVar(value=filled)
-    selected_color_var = tk.StringVar(value=f"Selected color: {color_idx + 1}/{len(PALETTE)}")
-
     def set_mode(m: DrawMode) -> None:
         nonlocal draw_mode, tool_kind, tool_dragging
         draw_mode = m
@@ -406,36 +422,76 @@ def main() -> None:
         tool_kind = "freeform"
         tool_dragging = False
         current.clear()
+        refresh_toolbar()
+        sync_canvas()
 
     def set_color(i: int) -> None:
         nonlocal color_idx
         color_idx = i
-        selected_color_var.set(f"Selected color: {color_idx + 1}/{len(PALETTE)}")
+        if palette_affects_shape_under_cursor():
+            hi = hover_shape_idx
+            if hi is not None:
+                shapes[hi].color = PALETTE[i]
+                selected_color_var.set(f"Shape #{hi + 1} — màu {i + 1}/{len(PALETTE)}")
+            else:
+                selected_color_var.set(f"Color {color_idx + 1}/{len(PALETTE)}")
+        else:
+            selected_color_var.set(f"Color {color_idx + 1}/{len(PALETTE)}")
+        sync_canvas()
+
+    def cycle_color_hover_or_brush(delta: int) -> None:
+        """M/N: giống lăn chuột — trỏ shape (và không đang vẽ/kéo xung đột) thì đổi màu shape + màu nét."""
+        nonlocal color_idx
+        if palette_affects_shape_under_cursor():
+            hi = hover_shape_idx
+            if hi is not None:
+                pi = palette_index_for_rgb(shapes[hi].color)
+                pi = (pi + delta) % len(PALETTE)
+                shapes[hi].color = PALETTE[pi]
+                color_idx = pi
+                selected_color_var.set(f"Shape #{hi + 1} — màu {pi + 1}/{len(PALETTE)}")
+        else:
+            color_idx = (color_idx + delta) % len(PALETTE)
+            selected_color_var.set(f"Color {color_idx + 1}/{len(PALETTE)}")
 
     def set_filled(v: bool) -> None:
         nonlocal filled
         filled = v
         filled_var.set(v)
+        sync_canvas()
 
     def ui_commit() -> None:
         if tool_kind == "freeform":
             commit_shape()
+        sync_canvas()
 
     def ui_undo() -> None:
+        nonlocal hover_shape_idx
         if tool_kind == "freeform" and current:
             current.pop()
         elif shapes:
             shapes.pop()
+        hover_shape_idx = shape_hit_index(mouse_xy[0], mouse_xy[1])
+        sync_canvas()
 
     def ui_clear() -> None:
+        nonlocal hover_shape_idx
         shapes.clear()
         current.clear()
+        hover_shape_idx = None
+        sync_canvas()
 
     def ui_scale_up() -> None:
         apply_scale_target(1.1)
+        sync_canvas()
 
     def ui_scale_down() -> None:
         apply_scale_target(0.9)
+        sync_canvas()
+
+    def refresh_toolbar() -> None:
+        for k, btn in tool_bar_buttons.items():
+            btn.configure(bg=BUTTON_ACTIVE if tool_kind == k else BUTTON_BG)
 
     def start_tool(kind: ToolKind) -> None:
         nonlocal tool_kind, tool_dragging, draw_mode
@@ -444,24 +500,43 @@ def main() -> None:
         current.clear()
         draw_mode = "polygon"
         mode_var.set(draw_mode)
-
-    transform_target_var = tk.StringVar(value="last")
+        refresh_toolbar()
+        sync_canvas()
 
     def transform_target_vertices() -> List[Tuple[float, float]] | None:
         nonlocal moved_shape_idx
         if moved_shape_idx is not None and 0 <= moved_shape_idx < len(shapes):
             return shapes[moved_shape_idx].vertices
-        if transform_target_var.get() == "current":
-            return current if current else None
         if shapes:
             return shapes[-1].vertices
         return None
+
+    def palette_index_for_rgb(rgb: Tuple[float, float, float]) -> int:
+        r, g, b = rgb
+        best_i = 0
+        best_d = 1e9
+        for i, p in enumerate(PALETTE):
+            d = (p[0] - r) ** 2 + (p[1] - g) ** 2 + (p[2] - b) ** 2
+            if d < best_d:
+                best_d = d
+                best_i = i
+        return best_i
+
+    def palette_affects_shape_under_cursor() -> bool:
+        """Trỏ vào shape + không đang kéo preset / không đang vẽ freeform có đỉnh → bảng màu tô shape đó (và vẫn cập nhật màu nét)."""
+        if tool_dragging:
+            return False
+        if tool_kind == "freeform" and current:
+            return False
+        hi = hover_shape_idx
+        return hi is not None and 0 <= hi < len(shapes)
 
     def move_target(dx: float, dy: float) -> None:
         verts = transform_target_vertices()
         if not verts:
             return
         verts[:] = [(float(x + dx), float(y + dy)) for x, y in verts]
+        sync_canvas()
 
     def rotate_target(deg: float) -> None:
         verts = transform_target_vertices()
@@ -476,71 +551,7 @@ def main() -> None:
             rx, ry = x - cx, y - cy
             out.append((float(cx + rx * ca - ry * sa), float(cy + rx * sa + ry * ca)))
         verts[:] = out
-
-    def ui_close() -> None:
-        glfw.set_window_should_close(window, True)
-        try:
-            ui_root.destroy()
-        except tk.TclError:
-            pass
-
-    ui_root.protocol("WM_DELETE_WINDOW", ui_close)
-
-    color_frame = tk.LabelFrame(ui_root, text="Color")
-    color_frame.pack(fill="x", padx=8, pady=6)
-    tk.Label(color_frame, textvariable=selected_color_var).pack(anchor="w", padx=8, pady=(4, 0))
-
-    palette_grid = tk.Frame(color_frame)
-    palette_grid.pack(padx=8, pady=6)
-    cols = 4
-    for i, (r, g, b) in enumerate(PALETTE):
-        hexv = rgb_to_hex(r, g, b)
-        btn = tk.Button(
-            palette_grid,
-            bg=hexv,
-            activebackground=hexv,
-            width=4,
-            height=2,
-            command=lambda i=i: set_color(i),
-        )
-        row, col = divmod(i, cols)
-        btn.grid(row=row, column=col, padx=2, pady=2)
-
-    fill_frame = tk.LabelFrame(ui_root, text="Options")
-    fill_frame.pack(fill="x", padx=8, pady=6)
-    tk.Checkbutton(fill_frame, text="Filled (polygon/triangles)", variable=filled_var, command=lambda: set_filled(bool(filled_var.get()))).pack(anchor="w", padx=8, pady=6)
-
-    preset_frame = tk.LabelFrame(ui_root, text="Tools (Click-drag trên màn hình)")
-    preset_frame.pack(fill="x", padx=8, pady=6)
-    tk.Button(preset_frame, text="Freeform", command=lambda: start_tool("freeform")).pack(side="left", expand=True, fill="x", padx=2, pady=6)
-    tk.Button(preset_frame, text="Triangle", command=lambda: start_tool("triangle")).pack(side="left", expand=True, fill="x", padx=2, pady=6)
-    tk.Button(preset_frame, text="Square", command=lambda: start_tool("square")).pack(side="left", expand=True, fill="x", padx=2, pady=6)
-    tk.Button(preset_frame, text="Circle", command=lambda: start_tool("circle")).pack(side="left", expand=True, fill="x", padx=2, pady=6)
-    tk.Button(preset_frame, text="Rectangle", command=lambda: start_tool("rectangle")).pack(side="left", expand=True, fill="x", padx=2, pady=6)
-    tk.Button(preset_frame, text="Pentagon", command=lambda: start_tool("pentagon")).pack(side="left", expand=True, fill="x", padx=2, pady=6)
-    tk.Button(preset_frame, text="Star", command=lambda: start_tool("star")).pack(side="left", expand=True, fill="x", padx=2, pady=6)
-
-    transform_frame = tk.LabelFrame(ui_root, text="Move (mouse drag) & Rotate")
-    transform_frame.pack(fill="x", padx=8, pady=6)
-
-    move_mouse_var = tk.BooleanVar(value=False)
-    tk.Checkbutton(
-        transform_frame,
-        text="Move bằng chuột (tick để kéo shape)",
-        variable=move_mouse_var,
-    ).pack(anchor="w", padx=8, pady=(6, 2))
-
-    rot_row = tk.Frame(transform_frame)
-    rot_row.pack(fill="x", padx=8, pady=(2, 6))
-    tk.Button(rot_row, text="Rotate -15°", command=lambda: rotate_target(-15.0)).pack(side="left", expand=True, fill="x", padx=(0, 4))
-    tk.Button(rot_row, text="Rotate +15°", command=lambda: rotate_target(15.0)).pack(side="left", expand=True, fill="x", padx=(4, 0))
-
-    buttons_frame = tk.Frame(ui_root)
-    buttons_frame.pack(fill="x", padx=8, pady=6)
-    tk.Button(buttons_frame, text="Commit (Enter)", command=ui_commit).pack(side="left", expand=True, fill="x", padx=(0, 4))
-    tk.Button(buttons_frame, text="Undo (Ctrl+Z)", command=ui_undo).pack(side="left", expand=True, fill="x", padx=(4, 0))
-
-    tk.Button(ui_root, text="Clear (C)", command=ui_clear).pack(fill="x", padx=8, pady=(0, 8))
+        sync_canvas()
 
     def print_help() -> None:
         print(
@@ -553,15 +564,15 @@ def main() -> None:
                     "  Freeform    => LMB add vertex (then Enter commit)",
                     "  RMB          delete nearest vertex (current)",
                     "  MMB drag     move a vertex (current)",
-                    "  Wheel       cycle color",
-                    "  Ctrl+Wheel  scale moved/last shape",
-                    "  Move tick    (checkbox) => LMB drag to move shapes",
+                    "  Wheel       trỏ shape → màu shape; không → màu nét (Ctrl+Wheel scale)",
+                    "  Trỏ shape    => bảng / lăn / M N đổi màu shape (không cần Move; freeform đang vẽ chỉ màu nét)",
+                    "  Move mode    => LMB kéo shape hoặc poly freeform (trong bbox)",
                     "",
                     "Keyboard:",
                     "  Q / E       Rotate moved/last shape",
                     "  Enter       Commit (only Freeform tool)",
                     "  F           Toggle filled (where applicable)",
-                    "  M / N       Next / previous color",
+                    "  M / N       Next/prev color (trỏ shape: shape đó; không: màu vẽ)",
                     "  1..9        Pick palette color",
                     "  Ctrl+Z      Undo (vertex in current, else last shape)",
                     "  C           Clear all shapes + current",
@@ -572,22 +583,277 @@ def main() -> None:
             )
         )
 
-    def on_resize(_w, width: int, height: int) -> None:
-        global W, H
-        W, H = max(320, width), max(240, height)
-        glViewport(0, 0, W, H)
-
-    def on_mouse_button(win, button: int, action: int, mods: int) -> None:
-        nonlocal drag_idx, tool_kind, tool_dragging, tool_start, draw_mode
-        nonlocal move_mouse_dragging, move_mouse_target_idx, move_mouse_last_pos
-        nonlocal moved_shape_idx
-        if action != glfw.PRESS and action != glfw.RELEASE:
+    def draw_shape(mode: DrawMode, verts: List[Tuple[float, float]], rgb: Tuple[float, float, float], fill: bool) -> None:
+        cv = _canvas_singleton[0]
+        u_c = cv._u_color
+        vao_id = cv._vao
+        r, g, b = rgb
+        n = upload(verts)
+        if n <= 0:
             return
-        mx, my = glfw.get_cursor_pos(win)
-        mx, my = cursor_to_framebuffer(win, mx, my)
+        glBindVertexArray(vao_id)
 
+        if mode == "polygon":
+            if fill and n >= 3:
+                tris = triangulate_polygon(verts)
+                if tris:
+                    tri_n = upload(tris)
+                    glUniform3f(u_c, r, g, b)
+                    glDrawArrays(GL_TRIANGLES, 0, tri_n)
+                    n = upload(verts)
+                else:
+                    glUniform3f(u_c, r, g, b)
+                    glDrawArrays(GL_TRIANGLE_FAN, 0, n)
+            if n >= 2:
+                er, eg, eb = (min(1.0, r + 0.2), min(1.0, g + 0.2), min(1.0, b + 0.2)) if fill else (r, g, b)
+                glUniform3f(u_c, er, eg, eb)
+                glLineWidth(2.0)
+                glDrawArrays(GL_LINE_LOOP, 0, n)
+        elif mode == "polyline":
+            if n >= 2:
+                glUniform3f(u_c, r, g, b)
+                glLineWidth(2.0)
+                glDrawArrays(GL_LINE_STRIP, 0, n)
+        elif mode == "triangles":
+            tri_n = (n // 3) * 3
+            if tri_n >= 3:
+                if fill:
+                    glUniform3f(u_c, r, g, b)
+                    glDrawArrays(GL_TRIANGLES, 0, tri_n)
+                er, eg, eb = (min(1.0, r + 0.2), min(1.0, g + 0.2), min(1.0, b + 0.2)) if fill else (r, g, b)
+                glUniform3f(u_c, er, eg, eb)
+                glLineWidth(2.0)
+                for i in range(0, tri_n, 3):
+                    glDrawArrays(GL_LINE_LOOP, i, 3)
+        elif mode == "points":
+            pass
+
+        glUniform3f(u_c, r, g, b)
+        glPointSize(8.0)
+        glDrawArrays(GL_POINTS, 0, n)
+        glBindVertexArray(0)
+
+    class ShapeCanvas(OpenGLFrame):
+        def tkResize(self, evt: tk.Event) -> None:
+            global W, H
+            self.width, self.height = evt.width, evt.height
+            if self.winfo_ismapped():
+                self.tkMakeCurrent()
+                glViewport(0, 0, max(1, self.width), max(1, self.height))
+                W, H = max(320, self.width), max(240, self.height)
+
+        def initgl(self) -> None:
+            self.tkMakeCurrent()
+            w = max(1, self.winfo_width())
+            h = max(1, self.winfo_height())
+            glViewport(0, 0, w, h)
+            global W, H
+            W, H = max(320, w), max(240, h)
+            self._program = compile_program()
+            self._u_mvp = glGetUniformLocation(self._program, "uMVP")
+            self._u_color = glGetUniformLocation(self._program, "uColor")
+            self._vbo = glGenBuffers(1)
+            self._vao = glGenVertexArrays(1)
+            glBindVertexArray(self._vao)
+            glBindBuffer(GL_ARRAY_BUFFER, self._vbo)
+            glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, None)
+            glEnableVertexAttribArray(0)
+            glBindVertexArray(0)
+            glClearColor(0.08, 0.09, 0.12, 1.0)
+            glEnable(GL_BLEND)
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+            self.animate = 16
+
+        def redraw(self) -> None:
+            self.tkMakeCurrent()
+            mvp = ortho_2d_tl_origin(float(W), float(H))
+            glClear(GL_COLOR_BUFFER_BIT)
+            glUseProgram(self._program)
+            glUniformMatrix4fv(self._u_mvp, 1, GL_TRUE, mvp)
+            for s in shapes:
+                draw_shape(s.mode, s.vertices, s.color, s.filled)
+            cur_rgb = PALETTE[color_idx]
+            draw_shape(draw_mode, current, cur_rgb, filled)
+            glUseProgram(0)
+            tool_lbl = tool_kind if tool_kind == "freeform" else f"{tool_kind}"
+            status_var.set(
+                f"Tool: {tool_lbl} | mode={draw_mode} | verts: {len(current)} | shapes: {len(shapes)} | "
+                f"{selected_color_var.get()} | mouse ({mouse_xy[0]:.0f}, {mouse_xy[1]:.0f})"
+            )
+            root.title(f"2D Shape Drawer — {tool_lbl} | {draw_mode} | {len(shapes)} shapes")
+
+    body = tk.Frame(root, bg=PANEL_BG)
+    body.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+    left = tk.Frame(body, width=TOOLBAR_WIDTH, bg=PANEL_BG, highlightthickness=1, highlightbackground=PANEL_BORDER)
+    left.pack(side=tk.LEFT, fill=tk.Y)
+    left.pack_propagate(False)
+
+    tool_font = tkfont.Font(family="Segoe UI", size=9)
+    tool_hint = tkfont.Font(family="Segoe UI", size=7)
+    tool_specs: List[Tuple[ToolKind, str, str]] = [
+        ("freeform", "Freeform", "click từng đỉnh"),
+        ("triangle", "Triangle", "kéo LMB"),
+        ("square", "Square", "kéo LMB"),
+        ("circle", "Circle", "kéo LMB"),
+        ("rectangle", "Rectangle", "kéo LMB"),
+        ("pentagon", "Pentagon", "kéo LMB"),
+        ("star", "Star", "kéo LMB"),
+    ]
+
+    tk.Label(left, text="Công cụ", fg=TEXT_COLOR, bg=PANEL_BG, font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=8, pady=(8, 4))
+    tools_box = tk.Frame(left, bg=PANEL_BG)
+    tools_box.pack(fill=tk.X, padx=6, pady=(0, 6))
+    for kind, lab, hint in tool_specs:
+        bf = tk.Frame(tools_box, bg=PANEL_BG)
+        bf.pack(fill=tk.X, pady=3)
+        b = tk.Button(
+            bf,
+            text=lab,
+            font=tool_font,
+            fg=TEXT_COLOR,
+            bg=BUTTON_BG,
+            activebackground=BUTTON_ACTIVE,
+            activeforeground=TEXT_COLOR,
+            relief=tk.FLAT,
+            anchor="w",
+            padx=6,
+            pady=4,
+            command=lambda k=kind: start_tool(k),
+        )
+        b.pack(fill=tk.X)
+        tk.Label(bf, text=hint, fg=SUBTEXT_COLOR, bg=PANEL_BG, font=tool_hint).pack(anchor="w", padx=4)
+        tool_bar_buttons[kind] = b
+
+    tk.Label(left, text="Màu", fg=TEXT_COLOR, bg=PANEL_BG, font=("Segoe UI", 10, "bold")).pack(
+        anchor="w", padx=8, pady=(8, 4)
+    )
+    pal_well = tk.Frame(left, bg=PALETTE_WELL_BG, highlightthickness=1, highlightbackground=PANEL_BORDER)
+    pal_well.pack(fill=tk.X, padx=8, pady=(0, 8))
+    pal_grid = tk.Frame(pal_well, bg=PALETTE_WELL_BG)
+    pal_grid.pack(fill=tk.X, padx=6, pady=6)
+    cols = 3
+    for idx, (pr, pg, pb) in enumerate(PALETTE):
+        row, col = divmod(idx, cols)
+        hx = rgb_to_hex(pr, pg, pb)
+        pbbtn = tk.Button(
+            pal_grid,
+            bg=hx,
+            activebackground=hx,
+            width=3,
+            height=1,
+            relief=tk.FLAT,
+            highlightthickness=1,
+            highlightbackground=PANEL_BORDER,
+            command=lambda i=idx: set_color(i),
+        )
+        pbbtn.grid(row=row, column=col, padx=3, pady=3, sticky="ew")
+    for c in range(cols):
+        pal_grid.columnconfigure(c, weight=1)
+
+    right = tk.Frame(body, width=PROPERTIES_WIDTH, bg=PANEL_BG, highlightthickness=1, highlightbackground=PANEL_BORDER)
+    right.pack(side=tk.RIGHT, fill=tk.Y)
+    right.pack_propagate(False)
+
+    mid = tk.Frame(body, bg=PANEL_BG)
+    mid.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+    gl_view = ShapeCanvas(mid, width=1024, height=640)
+    _canvas_singleton.append(gl_view)
+    try:
+        gl_view.configure(takefocus=1, highlightthickness=1, highlightbackground=PANEL_BORDER)
+    except tk.TclError:
+        pass
+    gl_view.pack(fill=tk.BOTH, expand=True)
+
+    rp = tk.Frame(right, bg=PANEL_BG)
+    rp.pack(fill=tk.BOTH, expand=True, padx=10, pady=8)
+
+    title_f = tkfont.Font(family="Segoe UI", size=11, weight="bold")
+    tk.Label(rp, text="Properties", font=title_f, fg=TEXT_COLOR, bg=PANEL_BG).pack(anchor="w")
+    tk.Label(rp, textvariable=selected_color_var, fg=SUBTEXT_COLOR, bg=PANEL_BG).pack(anchor="w", pady=(4, 8))
+
+    tk.Label(rp, text="Draw mode", fg=TEXT_COLOR, bg=PANEL_BG).pack(anchor="w")
+    mode_row = tk.Frame(rp, bg=PANEL_BG)
+    mode_row.pack(fill=tk.X, pady=(2, 8))
+    for label, dm in [("Poly", "polygon"), ("Line", "polyline"), ("Tri", "triangles"), ("Pts", "points")]:
+        tk.Button(
+            mode_row,
+            text=label,
+            font=tool_font,
+            fg=TEXT_COLOR,
+            bg=BUTTON_BG,
+            command=lambda m=dm: set_mode(m),  # type: ignore[misc]
+        ).pack(side=tk.LEFT, padx=2)
+
+    tk.Checkbutton(
+        rp,
+        text="Filled (polygon / triangles)",
+        variable=filled_var,
+        fg=TEXT_COLOR,
+        bg=PANEL_BG,
+        selectcolor=PANEL_BORDER,
+        activebackground=PANEL_BG,
+        activeforeground=TEXT_COLOR,
+        command=lambda: set_filled(bool(filled_var.get())),
+    ).pack(anchor="w", pady=(0, 8))
+
+    tk.Checkbutton(
+        rp,
+        text="Move: kéo shape / poly đang vẽ (LMB)",
+        variable=move_mouse_var,
+        fg=TEXT_COLOR,
+        bg=PANEL_BG,
+        selectcolor=PANEL_BORDER,
+        activebackground=PANEL_BG,
+        activeforeground=TEXT_COLOR,
+    ).pack(anchor="w", pady=(0, 2))
+    tk.Label(
+        rp,
+        text="Đưa con trỏ lên shape → lăn chuột hoặc chọn ô màu menu trái (Ctrl+wheel = scale)",
+        fg=SUBTEXT_COLOR,
+        bg=PANEL_BG,
+        font=("Segoe UI", 8),
+        wraplength=PROPERTIES_WIDTH - 20,
+        justify=tk.LEFT,
+    ).pack(anchor="w", pady=(0, 6))
+
+    tk.Label(rp, text="Scale (Ctrl + lăn chuột)", fg=TEXT_COLOR, bg=PANEL_BG).pack(anchor="w", pady=(4, 0))
+    sc_row = tk.Frame(rp, bg=PANEL_BG)
+    sc_row.pack(fill=tk.X, pady=(2, 8))
+    tk.Button(sc_row, text="Lớn +", font=tool_font, fg=TEXT_COLOR, bg=BUTTON_BG, command=ui_scale_up).pack(
+        side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 4)
+    )
+    tk.Button(sc_row, text="Nhỏ −", font=tool_font, fg=TEXT_COLOR, bg=BUTTON_BG, command=ui_scale_down).pack(
+        side=tk.LEFT, expand=True, fill=tk.X, padx=(4, 0)
+    )
+
+    rot_row = tk.Frame(rp, bg=PANEL_BG)
+    rot_row.pack(fill=tk.X, pady=(0, 8))
+    tk.Button(rot_row, text="Rot −15°", fg=TEXT_COLOR, bg=BUTTON_BG, command=lambda: rotate_target(-15.0)).pack(
+        side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 4)
+    )
+    tk.Button(rot_row, text="Rot +15°", fg=TEXT_COLOR, bg=BUTTON_BG, command=lambda: rotate_target(15.0)).pack(
+        side=tk.LEFT, expand=True, fill=tk.X, padx=(4, 0)
+    )
+
+    act = tk.Frame(rp, bg=PANEL_BG)
+    act.pack(fill=tk.X, pady=(0, 4))
+    tk.Button(act, text="Commit", fg=TEXT_COLOR, bg=BUTTON_BG, command=ui_commit).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 4))
+    tk.Button(act, text="Undo", fg=TEXT_COLOR, bg=BUTTON_BG, command=ui_undo).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(4, 0))
+    tk.Button(rp, text="Clear", fg=TEXT_COLOR, bg=BUTTON_BG, command=ui_clear).pack(fill=tk.X, pady=(4, 0))
+
+    status = tk.Frame(root, height=STATUS_BAR_HEIGHT, bg=PANEL_BG, highlightthickness=1, highlightbackground=PANEL_BORDER)
+    status.pack(side=tk.BOTTOM, fill=tk.X)
+    status.pack_propagate(False)
+    tk.Label(status, textvariable=status_var, fg=TEXT_COLOR, bg=PANEL_BG, font=("Segoe UI", 9)).pack(anchor="w", padx=8, pady=2)
+
+    def handle_mouse(mx: float, my: float, button: int, is_press: bool) -> None:
+        nonlocal drag_idx, tool_kind, tool_dragging, tool_start, draw_mode
+        nonlocal move_mouse_dragging, move_mouse_target_idx, move_mouse_drag_free_current, move_mouse_last_pos
+        nonlocal moved_shape_idx
         if move_mouse_var.get():
-            if button == glfw.MOUSE_BUTTON_LEFT and action == glfw.PRESS:
+            if button == 1 and is_press:
                 idx = shape_hit_index(mx, my)
                 if idx is not None:
                     tool_dragging = False
@@ -595,32 +861,39 @@ def main() -> None:
                     current.clear()
                     move_mouse_dragging = True
                     move_mouse_target_idx = idx
+                    move_mouse_drag_free_current = False
                     move_mouse_last_pos = (float(mx), float(my))
                     moved_shape_idx = idx
-                return
-            if button == glfw.MOUSE_BUTTON_LEFT and action == glfw.RELEASE:
+                    return
+                if tool_kind != "freeform":
+                    return
+                if current and current_bbox_hit(mx, my):
+                    tool_dragging = False
+                    drag_idx = None
+                    move_mouse_dragging = True
+                    move_mouse_target_idx = None
+                    move_mouse_drag_free_current = True
+                    move_mouse_last_pos = (float(mx), float(my))
+                    return
+            elif button == 1 and not is_press:
                 move_mouse_dragging = False
                 move_mouse_target_idx = None
+                move_mouse_drag_free_current = False
                 return
-            return
+            elif tool_kind != "freeform":
+                return
 
         if tool_kind != "freeform":
-            if button == glfw.MOUSE_BUTTON_LEFT and action == glfw.PRESS:
+            if button == 1 and is_press:
                 tool_dragging = True
                 tool_start = (float(mx), float(my))
                 draw_mode = "polygon"
                 mode_var.set(draw_mode)
                 current[:] = tool_vertices(tool_kind, mx, my, mx, my)
                 return
-            if button == glfw.MOUSE_BUTTON_LEFT and action == glfw.RELEASE and tool_dragging:
+            if button == 1 and not is_press and tool_dragging:
                 tool_dragging = False
-                verts = tool_vertices(
-                    tool_kind,
-                    tool_start[0],
-                    tool_start[1],
-                    mx,
-                    my,
-                )
+                verts = tool_vertices(tool_kind, tool_start[0], tool_start[1], mx, my)
                 if verts:
                     r, g, b = PALETTE[color_idx]
                     shapes.append(
@@ -635,10 +908,10 @@ def main() -> None:
                 return
             return
 
-        if button == glfw.MOUSE_BUTTON_LEFT and action == glfw.PRESS:
+        if button == 1 and is_press:
             if drag_idx is None:
                 current.append((float(mx), float(my)))
-        elif button == glfw.MOUSE_BUTTON_RIGHT and action == glfw.PRESS:
+        elif button == 3 and is_press:
             if not current:
                 return
             best_i = min(
@@ -647,7 +920,7 @@ def main() -> None:
             )
             if math.hypot(current[best_i][0] - mx, current[best_i][1] - my) <= hit_radius:
                 current.pop(best_i)
-        elif button == glfw.MOUSE_BUTTON_MIDDLE and action == glfw.PRESS:
+        elif button == 2 and is_press:
             if not current:
                 return
             best_i = min(
@@ -656,210 +929,217 @@ def main() -> None:
             )
             if math.hypot(current[best_i][0] - mx, current[best_i][1] - my) <= hit_radius:
                 drag_idx = best_i
-        elif button == glfw.MOUSE_BUTTON_MIDDLE and action == glfw.RELEASE:
+        elif button == 2 and not is_press:
             drag_idx = None
 
-    def on_cursor_pos(win, x: float, y: float) -> None:
+    def handle_cursor_motion(fx: float, fy: float) -> None:
         nonlocal tool_dragging, tool_kind, tool_start, draw_mode
-        nonlocal move_mouse_dragging, move_mouse_target_idx, move_mouse_last_pos
-        if move_mouse_dragging and move_mouse_target_idx is not None:
-            fx, fy = cursor_to_framebuffer(win, x, y)
+        nonlocal move_mouse_dragging, move_mouse_target_idx, move_mouse_drag_free_current, move_mouse_last_pos
+        if move_mouse_dragging:
             dx = float(fx) - move_mouse_last_pos[0]
             dy = float(fy) - move_mouse_last_pos[1]
             if dx != 0.0 or dy != 0.0:
-                verts = shapes[move_mouse_target_idx].vertices
-                verts[:] = [(float(vx + dx), float(vy + dy)) for vx, vy in verts]
+                if move_mouse_drag_free_current and current:
+                    current[:] = [(float(vx + dx), float(vy + dy)) for vx, vy in current]
+                elif move_mouse_target_idx is not None:
+                    verts = shapes[move_mouse_target_idx].vertices
+                    verts[:] = [(float(vx + dx), float(vy + dy)) for vx, vy in verts]
                 move_mouse_last_pos = (float(fx), float(fy))
             return
         if tool_kind != "freeform" and tool_dragging:
-            fx, fy = cursor_to_framebuffer(win, x, y)
             draw_mode = "polygon"
             mode_var.set(draw_mode)
             current[:] = tool_vertices(tool_kind, tool_start[0], tool_start[1], fx, fy)
             return
         if drag_idx is None or not current:
             return
-        fx, fy = cursor_to_framebuffer(win, x, y)
         current[drag_idx] = (float(fx), float(fy))
 
-    def on_scroll(_w, _dx: float, dy: float) -> None:
-        nonlocal color_idx
-        if move_mouse_var.get():
+    def sync_canvas() -> None:
+        """Vẽ lại ngay sau khi đổi dữ liệu (tránh chỉ dựa timer 16ms). Không gọi _display() để không chồng after()."""
+        try:
+            gl_view.update_idletasks()
+            gl_view.tkMakeCurrent()
+            gl_view.redraw()
+            gl_view.tkSwapBuffers()
+        except Exception:
+            pass
+
+    def canvas_mouse(event: tk.Event) -> None:
+        gl_view.focus_set()
+        t = event.type
+        is_press = t == 4 or getattr(t, "name", "") == "ButtonPress"
+        bn = int(getattr(event, "num", 1) or 1)
+        handle_mouse(float(event.x), float(event.y), bn, is_press)
+        sync_canvas()
+
+    def canvas_motion(event: tk.Event) -> None:
+        nonlocal hover_shape_idx
+        mouse_xy[0] = float(event.x)
+        mouse_xy[1] = float(event.y)
+        hover_shape_idx = shape_hit_index(float(event.x), float(event.y))
+        handle_cursor_motion(float(event.x), float(event.y))
+        sync_canvas()
+
+    def finish_tool_drag_outside(event: tk.Event) -> None:
+        nonlocal tool_dragging
+        if tool_kind == "freeform" or not tool_dragging:
             return
-        ctrl_down = (
-            glfw.get_key(_w, glfw.KEY_LEFT_CONTROL) == glfw.PRESS
-            or glfw.get_key(_w, glfw.KEY_RIGHT_CONTROL) == glfw.PRESS
-        )
+        if event.widget == gl_view:
+            return
+        handle_mouse(mouse_xy[0], mouse_xy[1], 1, False)
+        sync_canvas()
+
+    def canvas_wheel(event: tk.Event) -> None:
+        nonlocal color_idx
+        mx, my = float(event.x), float(event.y)
+        ctrl_down = bool(event.state & 0x0004)
+        dy = getattr(event, "delta", 0) or 0
+
         if ctrl_down:
             if dy > 0:
                 apply_scale_target(1.08)
             elif dy < 0:
                 apply_scale_target(0.92)
+            sync_canvas()
             return
+
+        hi = shape_hit_index(mx, my)
+        if hi is not None and dy != 0 and not tool_dragging and not (tool_kind == "freeform" and current):
+            pi = palette_index_for_rgb(shapes[hi].color)
+            if dy > 0:
+                pi = (pi + 1) % len(PALETTE)
+            else:
+                pi = (pi - 1) % len(PALETTE)
+            shapes[hi].color = PALETTE[pi]
+            color_idx = pi
+            selected_color_var.set(f"Shape #{hi + 1} — màu {pi + 1}/{len(PALETTE)}")
+            sync_canvas()
+            return
+
         if dy > 0:
             color_idx = (color_idx + 1) % len(PALETTE)
         elif dy < 0:
             color_idx = (color_idx - 1) % len(PALETTE)
-        selected_color_var.set(f"Selected color: {color_idx + 1}/{len(PALETTE)}")
-
-    def on_key(_w, key: int, _scancode: int, action: int, mods: int) -> None:
-        nonlocal filled, color_idx, draw_mode
-        if action != glfw.PRESS:
+        else:
             return
-        if key == glfw.KEY_ESCAPE:
-            glfw.set_window_should_close(_w, True)
-        elif key == glfw.KEY_C:
-            shapes.clear()
-            current.clear()
-        elif key == glfw.KEY_M:
-            color_idx = (color_idx + 1) % len(PALETTE)
-            selected_color_var.set(f"Selected color: {color_idx + 1}/{len(PALETTE)}")
-        elif key == glfw.KEY_N:
-            color_idx = (color_idx - 1) % len(PALETTE)
-            selected_color_var.set(f"Selected color: {color_idx + 1}/{len(PALETTE)}")
-        elif key == glfw.KEY_P:
-            draw_mode = "polygon"
-            mode_var.set(draw_mode)
-        elif key == glfw.KEY_L:
-            draw_mode = "polyline"
-            mode_var.set(draw_mode)
-        elif key == glfw.KEY_T:
-            draw_mode = "triangles"
-            mode_var.set(draw_mode)
-        elif key == glfw.KEY_O:
-            draw_mode = "points"
-            mode_var.set(draw_mode)
-        elif key == glfw.KEY_ENTER or key == glfw.KEY_KP_ENTER:
-            if tool_kind == "freeform":
+        selected_color_var.set(f"Color {color_idx + 1}/{len(PALETTE)}")
+        sync_canvas()
+
+    def canvas_key(event: tk.Event) -> None:
+        nonlocal filled, color_idx, draw_mode, tool_dragging
+        keysym = event.keysym
+        try:
+            if keysym == "Escape":
+                tool_dragging = False
+                root.quit()
+                return
+            if keysym in ("Return", "KP_Enter") and tool_kind == "freeform":
                 commit_shape()
-        elif key == glfw.KEY_H:
-            print_help()
-        elif key == glfw.KEY_UP:
-            move_target(0, -12)
-        elif key == glfw.KEY_DOWN:
-            move_target(0, 12)
-        elif key == glfw.KEY_LEFT:
-            move_target(-12, 0)
-        elif key == glfw.KEY_RIGHT:
-            move_target(12, 0)
-        elif key == glfw.KEY_Q:
-            rotate_target(-15.0)
-        elif key == glfw.KEY_E:
-            rotate_target(15.0)
-        elif key == glfw.KEY_Z and (mods & glfw.MOD_CONTROL):
-            if current:
-                current.pop()
-            elif shapes:
-                shapes.pop()
-        elif key == glfw.KEY_F:
-            filled = not filled
-            filled_var.set(filled)
-        elif glfw.KEY_1 <= key <= glfw.KEY_9:
-            n = key - glfw.KEY_1
-            if n < len(PALETTE):
-                color_idx = n
-                selected_color_var.set(f"Selected color: {color_idx + 1}/{len(PALETTE)}")
+                return
+            if keysym == "c" or keysym == "C":
+                shapes.clear()
+                current.clear()
+                return
+            if keysym == "m" or keysym == "M":
+                cycle_color_hover_or_brush(1)
+                return
+            if keysym == "n" or keysym == "N":
+                cycle_color_hover_or_brush(-1)
+                return
+            if keysym == "p" or keysym == "P":
+                draw_mode = "polygon"
+                mode_var.set(draw_mode)
+                return
+            if keysym == "l" or keysym == "L":
+                draw_mode = "polyline"
+                mode_var.set(draw_mode)
+                return
+            if keysym == "t" or keysym == "T":
+                draw_mode = "triangles"
+                mode_var.set(draw_mode)
+                return
+            if keysym == "o" or keysym == "O":
+                draw_mode = "points"
+                mode_var.set(draw_mode)
+                return
+            if keysym == "h" or keysym == "H":
+                print_help()
+                return
+            if keysym == "Up":
+                move_target(0, -12)
+                return
+            if keysym == "Down":
+                move_target(0, 12)
+                return
+            if keysym == "Left":
+                move_target(-12, 0)
+                return
+            if keysym == "Right":
+                move_target(12, 0)
+                return
+            if keysym == "q" or keysym == "Q":
+                rotate_target(-15.0)
+                return
+            if keysym == "e" or keysym == "E":
+                rotate_target(15.0)
+                return
+            if keysym == "f" or keysym == "F":
+                filled = not filled
+                filled_var.set(filled)
+                return
+            ch = event.char
+            if ch and ch in "123456789":
+                n = int(ch) - 1
+                if n < len(PALETTE):
+                    set_color(n)
+        finally:
+            if keysym != "Escape":
+                sync_canvas()
 
-    glfw.set_framebuffer_size_callback(window, on_resize)
-    glfw.set_mouse_button_callback(window, on_mouse_button)
-    glfw.set_cursor_pos_callback(window, on_cursor_pos)
-    glfw.set_scroll_callback(window, on_scroll)
-    glfw.set_key_callback(window, on_key)
+    def canvas_undo(_event: tk.Event | None = None) -> None:
+        nonlocal hover_shape_idx
+        if tool_kind == "freeform" and current:
+            current.pop()
+        elif shapes:
+            shapes.pop()
+        hover_shape_idx = shape_hit_index(mouse_xy[0], mouse_xy[1])
+        sync_canvas()
 
-    fb_w, fb_h = glfw.get_framebuffer_size(window)
-    glViewport(0, 0, fb_w, fb_h)
-    W, H = fb_w, fb_h
+    def ui_destroy() -> None:
+        if _canvas_singleton and getattr(_canvas_singleton[0], "_vbo", None):
+            try:
+                gl_view.tkMakeCurrent()
+                glDeleteBuffers(1, [_canvas_singleton[0]._vbo])
+                glDeleteVertexArrays(1, [_canvas_singleton[0]._vao])
+            except tk.TclError:
+                pass
+        root.destroy()
 
-    glClearColor(0.08, 0.09, 0.12, 1.0)
-    glEnable(GL_BLEND)
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+    for ev in (
+        "<ButtonPress-1>",
+        "<ButtonRelease-1>",
+        "<ButtonPress-2>",
+        "<ButtonRelease-2>",
+        "<ButtonPress-3>",
+        "<ButtonRelease-3>",
+    ):
+        gl_view.bind(ev, canvas_mouse)
+    gl_view.bind("<Motion>", canvas_motion)
+    gl_view.bind("<B1-Motion>", canvas_motion)
+    gl_view.bind("<B2-Motion>", canvas_motion)
+    gl_view.bind("<B3-Motion>", canvas_motion)
+    gl_view.bind("<MouseWheel>", canvas_wheel)
+    gl_view.bind("<Key>", canvas_key)
+    gl_view.bind("<Control-z>", canvas_undo)
+    gl_view.bind("<Enter>", lambda _e: gl_view.focus_set())
+    root.bind_all("<ButtonRelease-1>", finish_tool_drag_outside)
 
-    def draw_shape(mode: DrawMode, verts: List[Tuple[float, float]], rgb: Tuple[float, float, float], fill: bool) -> None:
-        r, g, b = rgb
-        n = upload(verts)
-        if n <= 0:
-            return
-        glBindVertexArray(vao)
-
-        if mode == "polygon":
-            if fill and n >= 3:
-                tris = triangulate_polygon(verts)
-                if tris:
-                    tri_n = upload(tris)
-                    glUniform3f(u_color, r, g, b)
-                    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
-                    glDrawArrays(GL_TRIANGLES, 0, tri_n)
-                    n = upload(verts)
-                else:
-                    glUniform3f(u_color, r, g, b)
-                    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
-                    glDrawArrays(GL_TRIANGLE_FAN, 0, n)
-            if n >= 2:
-                er, eg, eb = (min(1.0, r + 0.2), min(1.0, g + 0.2), min(1.0, b + 0.2)) if fill else (r, g, b)
-                glUniform3f(u_color, er, eg, eb)
-                glLineWidth(2.0)
-                glDrawArrays(GL_LINE_LOOP, 0, n)
-        elif mode == "polyline":
-            if n >= 2:
-                glUniform3f(u_color, r, g, b)
-                glLineWidth(2.0)
-                glDrawArrays(GL_LINE_STRIP, 0, n)
-        elif mode == "triangles":
-            tri_n = (n // 3) * 3
-            if tri_n >= 3:
-                if fill:
-                    glUniform3f(u_color, r, g, b)
-                    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
-                    glDrawArrays(GL_TRIANGLES, 0, tri_n)
-                er, eg, eb = (min(1.0, r + 0.2), min(1.0, g + 0.2), min(1.0, b + 0.2)) if fill else (r, g, b)
-                glUniform3f(u_color, er, eg, eb)
-                glLineWidth(2.0)
-                for i in range(0, tri_n, 3):
-                    glDrawArrays(GL_LINE_LOOP, i, 3)
-        elif mode == "points":
-            pass
-
-        glUniform3f(u_color, r, g, b)
-        glPointSize(8.0)
-        glDrawArrays(GL_POINTS, 0, n)
-        glBindVertexArray(0)
+    root.protocol("WM_DELETE_WINDOW", ui_destroy)
 
     print_help()
-
-    while not glfw.window_should_close(window):
-        glfw.poll_events()
-        try:
-            ui_root.update()
-        except tk.TclError:
-            glfw.set_window_should_close(window, True)
-            break
-
-        mvp = ortho_2d_tl_origin(float(W), float(H))
-
-        glClear(GL_COLOR_BUFFER_BIT)
-        glUseProgram(program)
-        glUniformMatrix4fv(u_mvp, 1, GL_TRUE, mvp)
-
-        for s in shapes:
-            draw_shape(s.mode, s.vertices, s.color, s.filled)
-
-        cur_rgb = PALETTE[color_idx]
-        draw_shape(draw_mode, current, cur_rgb, filled)
-
-        glUseProgram(0)
-
-        title = (
-            f"2D Shape Drawer | mode={draw_mode} | current_verts={len(current)} | shapes={len(shapes)} | "
-            f"color={color_idx + 1}/{len(PALETTE)} | {'filled' if filled else 'edge/points'}"
-        )
-        glfw.set_window_title(window, title)
-
-        glfw.swap_buffers(window)
-
-    glDeleteBuffers(1, [vbo])
-    glDeleteVertexArrays(1, [vao])
-    glfw.destroy_window(window)
-    glfw.terminate()
+    refresh_toolbar()
+    root.mainloop()
 
 
 if __name__ == "__main__":
