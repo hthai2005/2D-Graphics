@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import List, Tuple, Literal
 
 import tkinter as tk
+import tkinter.ttk as ttk
 from tkinter import font as tkfont
 import numpy as np
 from OpenGL.GL import *
@@ -225,11 +226,29 @@ def main() -> None:
 
     mode_var = tk.StringVar(value=draw_mode)
     filled_var = tk.BooleanVar(value=filled)
-    selected_color_var = tk.StringVar(value=f"Color {color_idx + 1}/{len(PALETTE)}")
+    selected_color_var = tk.StringVar(value=f"Bút / đang vẽ — màu {color_idx + 1}/{len(PALETTE)}")
     status_var = tk.StringVar(value="")
     move_mouse_var = tk.BooleanVar(value=False)
     mouse_xy: List[float] = [0.0, 0.0]
     hover_shape_idx: int | None = None
+
+    props_target_var = tk.StringVar(value="brush")
+    props_shape_var = tk.StringVar(value="1")
+    _props_combo_ref: list[ttk.Combobox | None] = [None]
+
+    def props_menu_shape_index() -> int | None:
+        if props_target_var.get() != "shape":
+            return None
+        if not shapes:
+            return None
+        sel = props_shape_var.get().strip()
+        try:
+            idx = int(sel) - 1
+        except ValueError:
+            idx = 0
+        if 0 <= idx < len(shapes):
+            return idx
+        return len(shapes) - 1
 
     tool_bar_buttons: dict[ToolKind, tk.Button] = {}
     _canvas_singleton: list = []
@@ -274,6 +293,7 @@ def main() -> None:
         r, g, b = PALETTE[color_idx]
         shapes.append(Shape(mode=draw_mode, vertices=current[:], color=(r, g, b), filled=filled))
         current = []
+        refresh_props_shape_ui()
 
     def apply_scale_current(factor: float) -> None:
         if not current:
@@ -428,15 +448,12 @@ def main() -> None:
     def set_color(i: int) -> None:
         nonlocal color_idx
         color_idx = i
-        if palette_affects_shape_under_cursor():
-            hi = hover_shape_idx
-            if hi is not None:
-                shapes[hi].color = PALETTE[i]
-                selected_color_var.set(f"Shape #{hi + 1} — màu {i + 1}/{len(PALETTE)}")
-            else:
-                selected_color_var.set(f"Color {color_idx + 1}/{len(PALETTE)}")
+        si = props_menu_shape_index()
+        if si is not None:
+            shapes[si].color = PALETTE[i]
+            selected_color_var.set(f"Shape #{si + 1} — màu {i + 1}/{len(PALETTE)}")
         else:
-            selected_color_var.set(f"Color {color_idx + 1}/{len(PALETTE)}")
+            selected_color_var.set(f"Bút / đang vẽ — màu {i + 1}/{len(PALETTE)}")
         sync_canvas()
 
     def cycle_color_hover_or_brush(delta: int) -> None:
@@ -452,11 +469,35 @@ def main() -> None:
                 selected_color_var.set(f"Shape #{hi + 1} — màu {pi + 1}/{len(PALETTE)}")
         else:
             color_idx = (color_idx + delta) % len(PALETTE)
-            selected_color_var.set(f"Color {color_idx + 1}/{len(PALETTE)}")
+            selected_color_var.set(f"Bút / đang vẽ — màu {color_idx + 1}/{len(PALETTE)}")
+
+    def toggle_filled_hover_or_brush() -> None:
+        nonlocal filled
+        mx, my = mouse_xy[0], mouse_xy[1]
+        if tool_dragging:
+            filled = not filled
+            filled_var.set(filled)
+            return
+        if current and current_bbox_hit(mx, my):
+            filled = not filled
+            filled_var.set(filled)
+            return
+        hi = shape_hit_index(mx, my)
+        if hi is not None:
+            shapes[hi].filled = not shapes[hi].filled
+            filled = shapes[hi].filled
+            filled_var.set(filled)
+            return
+        filled = not filled
+        filled_var.set(filled)
 
     def set_filled(v: bool) -> None:
         nonlocal filled
-        filled = v
+        si = props_menu_shape_index()
+        if si is not None:
+            shapes[si].filled = v
+        else:
+            filled = v
         filled_var.set(v)
         sync_canvas()
 
@@ -472,6 +513,7 @@ def main() -> None:
         elif shapes:
             shapes.pop()
         hover_shape_idx = shape_hit_index(mouse_xy[0], mouse_xy[1])
+        refresh_props_shape_ui()
         sync_canvas()
 
     def ui_clear() -> None:
@@ -479,6 +521,7 @@ def main() -> None:
         shapes.clear()
         current.clear()
         hover_shape_idx = None
+        refresh_props_shape_ui()
         sync_canvas()
 
     def ui_scale_up() -> None:
@@ -521,6 +564,42 @@ def main() -> None:
                 best_d = d
                 best_i = i
         return best_i
+
+    def refresh_props_shape_ui() -> None:
+        nonlocal color_idx, filled
+        vals = [f"{i + 1}" for i in range(len(shapes))]
+        cmb = _props_combo_ref[0]
+        if cmb is not None:
+            cmb.configure(values=vals)
+        if props_target_var.get() == "shape" and shapes:
+            if cmb is not None:
+                cmb.configure(state="readonly")
+            cur = props_shape_var.get()
+            if cur not in vals:
+                props_shape_var.set(vals[-1])
+            si = props_menu_shape_index()
+            if si is not None:
+                filled_var.set(shapes[si].filled)
+                color_idx = palette_index_for_rgb(shapes[si].color)
+                selected_color_var.set(f"Shape #{si + 1} — màu {color_idx + 1}/{len(PALETTE)}")
+        else:
+            if cmb is not None:
+                cmb.configure(state="disabled")
+            filled_var.set(filled)
+            selected_color_var.set(f"Bút / đang vẽ — màu {color_idx + 1}/{len(PALETTE)}")
+        sync_canvas()
+
+    def on_props_shape_pick(_evt: tk.Event | None = None) -> None:
+        nonlocal color_idx, filled
+        if props_target_var.get() != "shape" or not shapes:
+            return
+        si = props_menu_shape_index()
+        if si is None:
+            return
+        filled_var.set(shapes[si].filled)
+        color_idx = palette_index_for_rgb(shapes[si].color)
+        selected_color_var.set(f"Shape #{si + 1} — màu {color_idx + 1}/{len(PALETTE)}")
+        sync_canvas()
 
     def palette_affects_shape_under_cursor() -> bool:
         """Trỏ vào shape + không đang kéo preset / không đang vẽ freeform có đỉnh → bảng màu tô shape đó (và vẫn cập nhật màu nét)."""
@@ -568,12 +647,15 @@ def main() -> None:
                     "  Trỏ shape    => bảng / lăn / M N đổi màu shape (không cần Move; freeform đang vẽ chỉ màu nét)",
                     "  Move mode    => LMB kéo shape hoặc poly freeform (trong bbox)",
                     "",
+                    "Menu trái / phải:",
+                    "  Ô màu trái + Filled phải: chọn Bút hoặc Shape # (radio) rồi đổi — áp đúng mục tiêu, không cần trỏ canvas.",
+                    "",
                     "Keyboard:",
                     "  Q / E       Rotate moved/last shape",
                     "  Enter       Commit (only Freeform tool)",
-                    "  F           Toggle filled (where applicable)",
+                    "  F           Toggle filled (trỏ canvas: poly bbox / shape / bút)",
                     "  M / N       Next/prev color (trỏ shape: shape đó; không: màu vẽ)",
-                    "  1..9        Pick palette color",
+                    "  1..9        Pick palette color (theo mục tiêu Bút/Shape trên panel phải)",
                     "  Ctrl+Z      Undo (vertex in current, else last shape)",
                     "  C           Clear all shapes + current",
                     "  H           Show this help",
@@ -728,6 +810,15 @@ def main() -> None:
     tk.Label(left, text="Màu", fg=TEXT_COLOR, bg=PANEL_BG, font=("Segoe UI", 10, "bold")).pack(
         anchor="w", padx=8, pady=(8, 4)
     )
+    tk.Label(
+        left,
+        text="(theo Bút / Shape # ở panel phải)",
+        fg=SUBTEXT_COLOR,
+        bg=PANEL_BG,
+        font=("Segoe UI", 8),
+        wraplength=TOOLBAR_WIDTH + 8,
+        justify=tk.LEFT,
+    ).pack(anchor="w", padx=8, pady=(0, 2))
     pal_well = tk.Frame(left, bg=PALETTE_WELL_BG, highlightthickness=1, highlightbackground=PANEL_BORDER)
     pal_well.pack(fill=tk.X, padx=8, pady=(0, 8))
     pal_grid = tk.Frame(pal_well, bg=PALETTE_WELL_BG)
@@ -771,6 +862,41 @@ def main() -> None:
 
     title_f = tkfont.Font(family="Segoe UI", size=11, weight="bold")
     tk.Label(rp, text="Properties", font=title_f, fg=TEXT_COLOR, bg=PANEL_BG).pack(anchor="w")
+    tk.Label(rp, text="Màu & Filled áp vào:", fg=TEXT_COLOR, bg=PANEL_BG).pack(anchor="w", pady=(4, 0))
+    tgt_fr = tk.Frame(rp, bg=PANEL_BG)
+    tgt_fr.pack(anchor="w", fill="x", pady=(0, 4))
+    tk.Radiobutton(
+        tgt_fr,
+        text="Bút (mới + đang vẽ)",
+        variable=props_target_var,
+        value="brush",
+        command=refresh_props_shape_ui,
+        fg=TEXT_COLOR,
+        bg=PANEL_BG,
+        activebackground=PANEL_BG,
+        activeforeground=TEXT_COLOR,
+        selectcolor=PANEL_BORDER,
+        anchor="w",
+    ).pack(anchor="w")
+    tk.Radiobutton(
+        tgt_fr,
+        text="Shape đã vẽ",
+        variable=props_target_var,
+        value="shape",
+        command=refresh_props_shape_ui,
+        fg=TEXT_COLOR,
+        bg=PANEL_BG,
+        activebackground=PANEL_BG,
+        activeforeground=TEXT_COLOR,
+        selectcolor=PANEL_BORDER,
+        anchor="w",
+    ).pack(anchor="w")
+    tk.Label(rp, text="Chọn shape #:", fg=TEXT_COLOR, bg=PANEL_BG).pack(anchor="w")
+    props_shape_combo = ttk.Combobox(rp, textvariable=props_shape_var, width=10, state="disabled")
+    props_shape_combo.pack(anchor="w", pady=(0, 8))
+    props_shape_combo.bind("<<ComboboxSelected>>", on_props_shape_pick)
+    _props_combo_ref[0] = props_shape_combo
+
     tk.Label(rp, textvariable=selected_color_var, fg=SUBTEXT_COLOR, bg=PANEL_BG).pack(anchor="w", pady=(4, 8))
 
     tk.Label(rp, text="Draw mode", fg=TEXT_COLOR, bg=PANEL_BG).pack(anchor="w")
@@ -788,7 +914,7 @@ def main() -> None:
 
     tk.Checkbutton(
         rp,
-        text="Filled (polygon / triangles)",
+        text="Filled",
         variable=filled_var,
         fg=TEXT_COLOR,
         bg=PANEL_BG,
@@ -800,7 +926,7 @@ def main() -> None:
 
     tk.Checkbutton(
         rp,
-        text="Move: kéo shape / poly đang vẽ (LMB)",
+        text="Move",
         variable=move_mouse_var,
         fg=TEXT_COLOR,
         bg=PANEL_BG,
@@ -810,7 +936,7 @@ def main() -> None:
     ).pack(anchor="w", pady=(0, 2))
     tk.Label(
         rp,
-        text="Đưa con trỏ lên shape → lăn chuột hoặc chọn ô màu menu trái (Ctrl+wheel = scale)",
+        text="Menu trái: ô màu. Menu phải: chọn Bút hoặc Shape # rồi đổi màu / Filled. Trên canvas: lăn chuột khi trỏ shape (Ctrl+wheel = scale).",
         fg=SUBTEXT_COLOR,
         bg=PANEL_BG,
         font=("Segoe UI", 8),
@@ -865,9 +991,7 @@ def main() -> None:
                     move_mouse_last_pos = (float(mx), float(my))
                     moved_shape_idx = idx
                     return
-                if tool_kind != "freeform":
-                    return
-                if current and current_bbox_hit(mx, my):
+                if tool_kind == "freeform" and current and current_bbox_hit(mx, my):
                     tool_dragging = False
                     drag_idx = None
                     move_mouse_dragging = True
@@ -876,12 +1000,11 @@ def main() -> None:
                     move_mouse_last_pos = (float(mx), float(my))
                     return
             elif button == 1 and not is_press:
-                move_mouse_dragging = False
-                move_mouse_target_idx = None
-                move_mouse_drag_free_current = False
-                return
-            elif tool_kind != "freeform":
-                return
+                if move_mouse_dragging or move_mouse_drag_free_current:
+                    move_mouse_dragging = False
+                    move_mouse_target_idx = None
+                    move_mouse_drag_free_current = False
+                    return
 
         if tool_kind != "freeform":
             if button == 1 and is_press:
@@ -904,6 +1027,7 @@ def main() -> None:
                             filled=filled,
                         )
                     )
+                    refresh_props_shape_ui()
                 current.clear()
                 return
             return
@@ -1023,7 +1147,7 @@ def main() -> None:
             color_idx = (color_idx - 1) % len(PALETTE)
         else:
             return
-        selected_color_var.set(f"Color {color_idx + 1}/{len(PALETTE)}")
+        selected_color_var.set(f"Bút / đang vẽ — màu {color_idx + 1}/{len(PALETTE)}")
         sync_canvas()
 
     def canvas_key(event: tk.Event) -> None:
@@ -1085,8 +1209,7 @@ def main() -> None:
                 rotate_target(15.0)
                 return
             if keysym == "f" or keysym == "F":
-                filled = not filled
-                filled_var.set(filled)
+                toggle_filled_hover_or_brush()
                 return
             ch = event.char
             if ch and ch in "123456789":
@@ -1104,6 +1227,7 @@ def main() -> None:
         elif shapes:
             shapes.pop()
         hover_shape_idx = shape_hit_index(mouse_xy[0], mouse_xy[1])
+        refresh_props_shape_ui()
         sync_canvas()
 
     def ui_destroy() -> None:
@@ -1139,6 +1263,7 @@ def main() -> None:
 
     print_help()
     refresh_toolbar()
+    refresh_props_shape_ui()
     root.mainloop()
 
 
