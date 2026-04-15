@@ -191,8 +191,8 @@ def main() -> None:
     global W, H
 
     # Layout / colors aligned with "2Interactive 2D Shape Drawer" (editor_panels toolbar + properties + status)
-    TOOLBAR_WIDTH = 118
-    PROPERTIES_WIDTH = 240
+    TOOLBAR_WIDTH = 128
+    PROPERTIES_WIDTH = 280
     STATUS_BAR_HEIGHT = 24
     PANEL_BG = "#ffffff"
     PANEL_BORDER = "#d8dce6"
@@ -601,6 +601,62 @@ def main() -> None:
         selected_color_var.set(f"Shape #{si + 1} — màu {color_idx + 1}/{len(PALETTE)}")
         sync_canvas()
 
+    def z_order_target_index() -> int | None:
+        if props_target_var.get() == "shape" and shapes:
+            si = props_menu_shape_index()
+            if si is not None:
+                return si
+        if hover_shape_idx is not None and 0 <= hover_shape_idx < len(shapes):
+            return hover_shape_idx
+        return None
+
+    def _after_z_order_change(target_shape: Shape, moved_ref: Shape | None) -> None:
+        nonlocal moved_shape_idx, hover_shape_idx
+        ni = next(i for i, s in enumerate(shapes) if s is target_shape)
+        props_target_var.set("shape")
+        props_shape_var.set(str(ni + 1))
+        if moved_ref is not None:
+            moved_shape_idx = next((i for i, s in enumerate(shapes) if s is moved_ref), None)
+        hover_shape_idx = shape_hit_index(mouse_xy[0], mouse_xy[1])
+        refresh_props_shape_ui()
+        sync_canvas()
+
+    def z_order_bring_forward() -> None:
+        si = z_order_target_index()
+        if si is None or si >= len(shapes) - 1:
+            return
+        moved_ref = shapes[moved_shape_idx] if moved_shape_idx is not None else None
+        sh = shapes[si]
+        shapes[si], shapes[si + 1] = shapes[si + 1], shapes[si]
+        _after_z_order_change(sh, moved_ref)
+
+    def z_order_send_backward() -> None:
+        si = z_order_target_index()
+        if si is None or si <= 0:
+            return
+        moved_ref = shapes[moved_shape_idx] if moved_shape_idx is not None else None
+        sh = shapes[si]
+        shapes[si], shapes[si - 1] = shapes[si - 1], shapes[si]
+        _after_z_order_change(sh, moved_ref)
+
+    def z_order_to_front() -> None:
+        si = z_order_target_index()
+        if si is None or not shapes:
+            return
+        moved_ref = shapes[moved_shape_idx] if moved_shape_idx is not None else None
+        sh = shapes.pop(si)
+        shapes.append(sh)
+        _after_z_order_change(sh, moved_ref)
+
+    def z_order_to_back() -> None:
+        si = z_order_target_index()
+        if si is None or not shapes:
+            return
+        moved_ref = shapes[moved_shape_idx] if moved_shape_idx is not None else None
+        sh = shapes.pop(si)
+        shapes.insert(0, sh)
+        _after_z_order_change(sh, moved_ref)
+
     def palette_affects_shape_under_cursor() -> bool:
         """Trỏ vào shape + không đang kéo preset / không đang vẽ freeform có đỉnh → bảng màu tô shape đó (và vẫn cập nhật màu nét)."""
         if tool_dragging:
@@ -660,6 +716,8 @@ def main() -> None:
                     "  C           Clear all shapes + current",
                     "  H           Show this help",
                     "  Esc         Quit",
+                    "  [ / ]       Lên / xuống một lớp (Z-order)",
+                    "  Home / End  Dưới cùng / trên cùng",
                     "",
                 ]
             )
@@ -783,9 +841,19 @@ def main() -> None:
         ("star", "Star", "kéo LMB"),
     ]
 
-    tk.Label(left, text="Công cụ", fg=TEXT_COLOR, bg=PANEL_BG, font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=8, pady=(8, 4))
-    tools_box = tk.Frame(left, bg=PANEL_BG)
-    tools_box.pack(fill=tk.X, padx=6, pady=(0, 6))
+    lf_tools = tk.LabelFrame(
+        left,
+        text=" Công cụ ",
+        font=("Segoe UI", 9, "bold"),
+        fg=TEXT_COLOR,
+        bg=PANEL_BG,
+        bd=1,
+        relief=tk.SOLID,
+        labelanchor="nw",
+    )
+    lf_tools.pack(fill=tk.X, padx=6, pady=(8, 6))
+    tools_box = tk.Frame(lf_tools, bg=PANEL_BG)
+    tools_box.pack(fill=tk.X, padx=4, pady=6)
     for kind, lab, hint in tool_specs:
         bf = tk.Frame(tools_box, bg=PANEL_BG)
         bf.pack(fill=tk.X, pady=3)
@@ -807,20 +875,28 @@ def main() -> None:
         tk.Label(bf, text=hint, fg=SUBTEXT_COLOR, bg=PANEL_BG, font=tool_hint).pack(anchor="w", padx=4)
         tool_bar_buttons[kind] = b
 
-    tk.Label(left, text="Màu", fg=TEXT_COLOR, bg=PANEL_BG, font=("Segoe UI", 10, "bold")).pack(
-        anchor="w", padx=8, pady=(8, 4)
-    )
-    tk.Label(
+    lf_palette = tk.LabelFrame(
         left,
-        text="(theo Bút / Shape # ở panel phải)",
+        text=" Màu ",
+        font=("Segoe UI", 9, "bold"),
+        fg=TEXT_COLOR,
+        bg=PANEL_BG,
+        bd=1,
+        relief=tk.SOLID,
+        labelanchor="nw",
+    )
+    lf_palette.pack(fill=tk.X, padx=6, pady=(0, 8))
+    tk.Label(
+        lf_palette,
+        text="Theo Bút / Shape (panel phải)",
         fg=SUBTEXT_COLOR,
         bg=PANEL_BG,
-        font=("Segoe UI", 8),
-        wraplength=TOOLBAR_WIDTH + 8,
+        font=("Segoe UI", 7),
+        wraplength=TOOLBAR_WIDTH + 4,
         justify=tk.LEFT,
-    ).pack(anchor="w", padx=8, pady=(0, 2))
-    pal_well = tk.Frame(left, bg=PALETTE_WELL_BG, highlightthickness=1, highlightbackground=PANEL_BORDER)
-    pal_well.pack(fill=tk.X, padx=8, pady=(0, 8))
+    ).pack(anchor="w", padx=6, pady=(4, 4))
+    pal_well = tk.Frame(lf_palette, bg=PALETTE_WELL_BG, highlightthickness=1, highlightbackground=PANEL_BORDER)
+    pal_well.pack(fill=tk.X, padx=6, pady=(0, 8))
     pal_grid = tk.Frame(pal_well, bg=PALETTE_WELL_BG)
     pal_grid.pack(fill=tk.X, padx=6, pady=6)
     cols = 3
@@ -858,16 +934,29 @@ def main() -> None:
     gl_view.pack(fill=tk.BOTH, expand=True)
 
     rp = tk.Frame(right, bg=PANEL_BG)
-    rp.pack(fill=tk.BOTH, expand=True, padx=10, pady=8)
+    rp.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
-    title_f = tkfont.Font(family="Segoe UI", size=11, weight="bold")
-    tk.Label(rp, text="Properties", font=title_f, fg=TEXT_COLOR, bg=PANEL_BG).pack(anchor="w")
-    tk.Label(rp, text="Màu & Filled áp vào:", fg=TEXT_COLOR, bg=PANEL_BG).pack(anchor="w", pady=(4, 0))
-    tgt_fr = tk.Frame(rp, bg=PANEL_BG)
-    tgt_fr.pack(anchor="w", fill="x", pady=(0, 4))
+    title_f = tkfont.Font(family="Segoe UI", size=12, weight="bold")
+    tk.Label(rp, text="Thuộc tính", font=title_f, fg=TEXT_COLOR, bg=PANEL_BG).pack(anchor="w", pady=(0, 8))
+
+    lf_obj = tk.LabelFrame(
+        rp,
+        text=" Đối tượng ",
+        font=("Segoe UI", 9, "bold"),
+        fg=TEXT_COLOR,
+        bg=PANEL_BG,
+        bd=1,
+        relief=tk.SOLID,
+        labelanchor="nw",
+    )
+    lf_obj.pack(fill=tk.X, pady=(0, 8))
+    obj_inner = tk.Frame(lf_obj, bg=PANEL_BG)
+    obj_inner.pack(fill=tk.X, padx=8, pady=8)
+    tgt_fr = tk.Frame(obj_inner, bg=PANEL_BG)
+    tgt_fr.pack(anchor="w", fill="x", pady=(0, 6))
     tk.Radiobutton(
         tgt_fr,
-        text="Bút (mới + đang vẽ)",
+        text="Bút — nét đang vẽ",
         variable=props_target_var,
         value="brush",
         command=refresh_props_shape_ui,
@@ -877,10 +966,12 @@ def main() -> None:
         activeforeground=TEXT_COLOR,
         selectcolor=PANEL_BORDER,
         anchor="w",
+        wraplength=PROPERTIES_WIDTH - 36,
+        justify=tk.LEFT,
     ).pack(anchor="w")
     tk.Radiobutton(
         tgt_fr,
-        text="Shape đã vẽ",
+        text="Shape — hình đã xong",
         variable=props_target_var,
         value="shape",
         command=refresh_props_shape_ui,
@@ -890,31 +981,140 @@ def main() -> None:
         activeforeground=TEXT_COLOR,
         selectcolor=PANEL_BORDER,
         anchor="w",
+        wraplength=PROPERTIES_WIDTH - 36,
+        justify=tk.LEFT,
     ).pack(anchor="w")
-    tk.Label(rp, text="Chọn shape #:", fg=TEXT_COLOR, bg=PANEL_BG).pack(anchor="w")
-    props_shape_combo = ttk.Combobox(rp, textvariable=props_shape_var, width=10, state="disabled")
-    props_shape_combo.pack(anchor="w", pady=(0, 8))
+    pick_row = tk.Frame(obj_inner, bg=PANEL_BG)
+    pick_row.pack(fill=tk.X)
+    tk.Label(pick_row, text="Shape #", fg=TEXT_COLOR, bg=PANEL_BG, font=tool_font).pack(side=tk.LEFT, padx=(0, 6))
+    props_shape_combo = ttk.Combobox(pick_row, textvariable=props_shape_var, width=8, state="disabled")
+    props_shape_combo.pack(side=tk.LEFT)
     props_shape_combo.bind("<<ComboboxSelected>>", on_props_shape_pick)
     _props_combo_ref[0] = props_shape_combo
 
-    tk.Label(rp, textvariable=selected_color_var, fg=SUBTEXT_COLOR, bg=PANEL_BG).pack(anchor="w", pady=(4, 8))
+    lf_z = tk.LabelFrame(
+        rp,
+        text=" Thứ tự lớp ",
+        font=("Segoe UI", 9, "bold"),
+        fg=TEXT_COLOR,
+        bg=PANEL_BG,
+        bd=1,
+        relief=tk.SOLID,
+        labelanchor="nw",
+    )
+    lf_z.pack(fill=tk.X, pady=(0, 8))
+    z_inner = tk.Frame(lf_z, bg=PANEL_BG)
+    z_inner.pack(fill=tk.X, padx=8, pady=(6, 8))
+    tk.Label(
+        z_inner,
+        text="Chọn Shape bên trên, hoặc trỏ chuột vào hình:",
+        fg=SUBTEXT_COLOR,
+        bg=PANEL_BG,
+        font=("Segoe UI", 8),
+        wraplength=PROPERTIES_WIDTH - 28,
+        justify=tk.LEFT,
+    ).pack(anchor="w", pady=(0, 6))
+    zo_row1 = tk.Frame(z_inner, bg=PANEL_BG)
+    zo_row1.pack(fill=tk.X, pady=(0, 4))
+    tk.Button(
+        zo_row1,
+        text="↑ Trước",
+        font=tool_font,
+        fg=TEXT_COLOR,
+        bg=BUTTON_BG,
+        activebackground=BUTTON_ACTIVE,
+        command=z_order_bring_forward,
+    ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 4))
+    tk.Button(
+        zo_row1,
+        text="↓ Sau",
+        font=tool_font,
+        fg=TEXT_COLOR,
+        bg=BUTTON_BG,
+        activebackground=BUTTON_ACTIVE,
+        command=z_order_send_backward,
+    ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(4, 0))
+    zo_row2 = tk.Frame(z_inner, bg=PANEL_BG)
+    zo_row2.pack(fill=tk.X)
+    tk.Button(
+        zo_row2,
+        text="⇈ Trên cùng",
+        font=tool_font,
+        fg=TEXT_COLOR,
+        bg=BUTTON_BG,
+        activebackground=BUTTON_ACTIVE,
+        command=z_order_to_front,
+    ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 4))
+    tk.Button(
+        zo_row2,
+        text="⇊ Dưới cùng",
+        font=tool_font,
+        fg=TEXT_COLOR,
+        bg=BUTTON_BG,
+        activebackground=BUTTON_ACTIVE,
+        command=z_order_to_back,
+    ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(4, 0))
+    tk.Label(
+        z_inner,
+        text="[ ] từng lớp · Home/End trên/dưới cùng",
+        fg=SUBTEXT_COLOR,
+        bg=PANEL_BG,
+        font=("Segoe UI", 7),
+        wraplength=PROPERTIES_WIDTH - 28,
+        justify=tk.LEFT,
+    ).pack(anchor="w", pady=(8, 0))
 
-    tk.Label(rp, text="Draw mode", fg=TEXT_COLOR, bg=PANEL_BG).pack(anchor="w")
-    mode_row = tk.Frame(rp, bg=PANEL_BG)
-    mode_row.pack(fill=tk.X, pady=(2, 8))
-    for label, dm in [("Poly", "polygon"), ("Line", "polyline"), ("Tri", "triangles"), ("Pts", "points")]:
+    tk.Label(rp, textvariable=selected_color_var, fg=SUBTEXT_COLOR, bg=PANEL_BG, font=tool_font).pack(anchor="w", pady=(0, 8))
+
+    lf_mode = tk.LabelFrame(
+        rp,
+        text=" Kiểu đường ",
+        font=("Segoe UI", 9, "bold"),
+        fg=TEXT_COLOR,
+        bg=PANEL_BG,
+        bd=1,
+        relief=tk.SOLID,
+        labelanchor="nw",
+    )
+    lf_mode.pack(fill=tk.X, pady=(0, 8))
+    mode_inner = tk.Frame(lf_mode, bg=PANEL_BG)
+    mode_inner.pack(fill=tk.X, padx=8, pady=8)
+    mode_row1 = tk.Frame(mode_inner, bg=PANEL_BG)
+    mode_row1.pack(fill=tk.X, pady=(0, 4))
+    mode_row2 = tk.Frame(mode_inner, bg=PANEL_BG)
+    mode_row2.pack(fill=tk.X)
+    for label, dm, rowf in [
+        ("Khép kín", "polygon", mode_row1),
+        ("Hở", "polyline", mode_row1),
+        ("Tam giác", "triangles", mode_row2),
+        ("Điểm", "points", mode_row2),
+    ]:
         tk.Button(
-            mode_row,
+            rowf,
             text=label,
             font=tool_font,
             fg=TEXT_COLOR,
             bg=BUTTON_BG,
+            activebackground=BUTTON_ACTIVE,
             command=lambda m=dm: set_mode(m),  # type: ignore[misc]
-        ).pack(side=tk.LEFT, padx=2)
+        ).pack(side=tk.LEFT, padx=2, expand=True, fill=tk.X)
 
-    tk.Checkbutton(
+    lf_disp = tk.LabelFrame(
         rp,
-        text="Filled",
+        text=" Hiển thị ",
+        font=("Segoe UI", 9, "bold"),
+        fg=TEXT_COLOR,
+        bg=PANEL_BG,
+        bd=1,
+        relief=tk.SOLID,
+        labelanchor="nw",
+    )
+    lf_disp.pack(fill=tk.X, pady=(0, 8))
+    disp_inner = tk.Frame(lf_disp, bg=PANEL_BG)
+    disp_inner.pack(fill=tk.X, padx=8, pady=8)
+    tk.Checkbutton(
+        disp_inner,
+        text="Tô kín",
         variable=filled_var,
         fg=TEXT_COLOR,
         bg=PANEL_BG,
@@ -922,52 +1122,123 @@ def main() -> None:
         activebackground=PANEL_BG,
         activeforeground=TEXT_COLOR,
         command=lambda: set_filled(bool(filled_var.get())),
-    ).pack(anchor="w", pady=(0, 8))
-
+    ).pack(anchor="w", pady=(0, 4))
     tk.Checkbutton(
-        rp,
-        text="Move",
+        disp_inner,
+        text="Di chuyển",
         variable=move_mouse_var,
         fg=TEXT_COLOR,
         bg=PANEL_BG,
         selectcolor=PANEL_BORDER,
         activebackground=PANEL_BG,
         activeforeground=TEXT_COLOR,
-    ).pack(anchor="w", pady=(0, 2))
+    ).pack(anchor="w")
     tk.Label(
-        rp,
-        text="Menu trái: ô màu. Menu phải: chọn Bút hoặc Shape # rồi đổi màu / Filled. Trên canvas: lăn chuột khi trỏ shape (Ctrl+wheel = scale).",
+        disp_inner,
+        text="Lăn chuột trên hình = đổi màu · Ctrl+lăn = thu phóng",
         fg=SUBTEXT_COLOR,
         bg=PANEL_BG,
         font=("Segoe UI", 8),
-        wraplength=PROPERTIES_WIDTH - 20,
+        wraplength=PROPERTIES_WIDTH - 28,
         justify=tk.LEFT,
-    ).pack(anchor="w", pady=(0, 6))
+    ).pack(anchor="w", pady=(6, 0))
 
-    tk.Label(rp, text="Scale (Ctrl + lăn chuột)", fg=TEXT_COLOR, bg=PANEL_BG).pack(anchor="w", pady=(4, 0))
-    sc_row = tk.Frame(rp, bg=PANEL_BG)
-    sc_row.pack(fill=tk.X, pady=(2, 8))
-    tk.Button(sc_row, text="Lớn +", font=tool_font, fg=TEXT_COLOR, bg=BUTTON_BG, command=ui_scale_up).pack(
-        side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 4)
+    lf_xf = tk.LabelFrame(
+        rp,
+        text=" Thu phóng · xoay ",
+        font=("Segoe UI", 9, "bold"),
+        fg=TEXT_COLOR,
+        bg=PANEL_BG,
+        bd=1,
+        relief=tk.SOLID,
+        labelanchor="nw",
     )
-    tk.Button(sc_row, text="Nhỏ −", font=tool_font, fg=TEXT_COLOR, bg=BUTTON_BG, command=ui_scale_down).pack(
-        side=tk.LEFT, expand=True, fill=tk.X, padx=(4, 0)
-    )
+    lf_xf.pack(fill=tk.X, pady=(0, 8))
+    xf_inner = tk.Frame(lf_xf, bg=PANEL_BG)
+    xf_inner.pack(fill=tk.X, padx=8, pady=8)
+    sc_row = tk.Frame(xf_inner, bg=PANEL_BG)
+    sc_row.pack(fill=tk.X, pady=(0, 6))
+    tk.Button(
+        sc_row,
+        text="Phóng +",
+        font=tool_font,
+        fg=TEXT_COLOR,
+        bg=BUTTON_BG,
+        activebackground=BUTTON_ACTIVE,
+        command=ui_scale_up,
+    ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 4))
+    tk.Button(
+        sc_row,
+        text="Thu −",
+        font=tool_font,
+        fg=TEXT_COLOR,
+        bg=BUTTON_BG,
+        activebackground=BUTTON_ACTIVE,
+        command=ui_scale_down,
+    ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(4, 0))
+    rot_row = tk.Frame(xf_inner, bg=PANEL_BG)
+    rot_row.pack(fill=tk.X)
+    tk.Button(
+        rot_row,
+        text="↺ −15°",
+        font=tool_font,
+        fg=TEXT_COLOR,
+        bg=BUTTON_BG,
+        activebackground=BUTTON_ACTIVE,
+        command=lambda: rotate_target(-15.0),
+    ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 4))
+    tk.Button(
+        rot_row,
+        text="↻ +15°",
+        font=tool_font,
+        fg=TEXT_COLOR,
+        bg=BUTTON_BG,
+        activebackground=BUTTON_ACTIVE,
+        command=lambda: rotate_target(15.0),
+    ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(4, 0))
 
-    rot_row = tk.Frame(rp, bg=PANEL_BG)
-    rot_row.pack(fill=tk.X, pady=(0, 8))
-    tk.Button(rot_row, text="Rot −15°", fg=TEXT_COLOR, bg=BUTTON_BG, command=lambda: rotate_target(-15.0)).pack(
-        side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 4)
+    lf_act = tk.LabelFrame(
+        rp,
+        text=" Tác vụ ",
+        font=("Segoe UI", 9, "bold"),
+        fg=TEXT_COLOR,
+        bg=PANEL_BG,
+        bd=1,
+        relief=tk.SOLID,
+        labelanchor="nw",
     )
-    tk.Button(rot_row, text="Rot +15°", fg=TEXT_COLOR, bg=BUTTON_BG, command=lambda: rotate_target(15.0)).pack(
-        side=tk.LEFT, expand=True, fill=tk.X, padx=(4, 0)
-    )
-
-    act = tk.Frame(rp, bg=PANEL_BG)
-    act.pack(fill=tk.X, pady=(0, 4))
-    tk.Button(act, text="Commit", fg=TEXT_COLOR, bg=BUTTON_BG, command=ui_commit).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 4))
-    tk.Button(act, text="Undo", fg=TEXT_COLOR, bg=BUTTON_BG, command=ui_undo).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(4, 0))
-    tk.Button(rp, text="Clear", fg=TEXT_COLOR, bg=BUTTON_BG, command=ui_clear).pack(fill=tk.X, pady=(4, 0))
+    lf_act.pack(fill=tk.X, pady=(0, 4))
+    act_inner = tk.Frame(lf_act, bg=PANEL_BG)
+    act_inner.pack(fill=tk.X, padx=8, pady=8)
+    act = tk.Frame(act_inner, bg=PANEL_BG)
+    act.pack(fill=tk.X, pady=(0, 6))
+    tk.Button(
+        act,
+        text="Ghi",
+        font=tool_font,
+        fg=TEXT_COLOR,
+        bg=BUTTON_BG,
+        activebackground=BUTTON_ACTIVE,
+        command=ui_commit,
+    ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 4))
+    tk.Button(
+        act,
+        text="Hoàn tác",
+        font=tool_font,
+        fg=TEXT_COLOR,
+        bg=BUTTON_BG,
+        activebackground=BUTTON_ACTIVE,
+        command=ui_undo,
+    ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(4, 0))
+    tk.Button(
+        act_inner,
+        text="Xóa hết",
+        font=tool_font,
+        fg=TEXT_COLOR,
+        bg=BUTTON_BG,
+        activebackground=BUTTON_ACTIVE,
+        command=ui_clear,
+    ).pack(fill=tk.X)
 
     status = tk.Frame(root, height=STATUS_BAR_HEIGHT, bg=PANEL_BG, highlightthickness=1, highlightbackground=PANEL_BORDER)
     status.pack(side=tk.BOTTOM, fill=tk.X)
@@ -1210,6 +1481,18 @@ def main() -> None:
                 return
             if keysym == "f" or keysym == "F":
                 toggle_filled_hover_or_brush()
+                return
+            if keysym == "bracketright":
+                z_order_bring_forward()
+                return
+            if keysym == "bracketleft":
+                z_order_send_backward()
+                return
+            if keysym == "Home":
+                z_order_to_back()
+                return
+            if keysym == "End":
+                z_order_to_front()
                 return
             ch = event.char
             if ch and ch in "123456789":
